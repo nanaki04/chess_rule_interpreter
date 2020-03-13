@@ -5,7 +5,7 @@
 
 % COMMANDS
 
-run_command(["Error", Error], _, Output) :- Output = ["Error", Error].
+run_command([error, Error], _, Output) :- Output = [error, Error].
 run_command([assess_moves, PieceCoord], GameState, Output) :-
   piece_at(PieceCoord, Piece, GameState),
   piece_movable_coords_without_exposing_king(Piece, Output, GameState).
@@ -16,7 +16,7 @@ run_command(no_matches, _, Output) :-
 
 piece_movable_coords_without_exposing_king(Piece, Coords, GameState) :-
   piece_movable_coords(Piece, MovableCoords, GameState),
-  query(ExposedCoord, exposes_king(Piece, ExposedCoord, GameState), ExposedCoords),
+  query(ExposedCoord, exposes_king(Piece, ExposedCoord, MovableCoords, GameState), ExposedCoords),
   subtract(MovableCoords, ExposedCoords, Coords).
 
 piece_movable_coords(Piece, Coords, GameState) :-
@@ -88,12 +88,7 @@ find_pawn_coord(Pawn, Offset, GameState) :-
   X in -1\/1,
   piece_has_color(Pawn, white),
   (is_occupied_by_enemy(Pawn, Offset, GameState);
-    is_empty(Pawn, Offset, GameState),
-    add_coord(Offset, [0, -1], EnPassantCoord),
-    piece_at(EnPassantCoord, PassedPawn, GameState),
-    piece_has_color(PassedPawn, black),
-    piece_has_move_count(PassedPawn, 1)
-    % TODO compare moved at turn = current turn - 1 or has some kind of buff
+    is_en_passant(Pawn, Offset, [0, -1], GameState)
   ).
 
 find_pawn_coord(Pawn, Offset, GameState) :-
@@ -101,13 +96,19 @@ find_pawn_coord(Pawn, Offset, GameState) :-
   X in -1\/1,
   piece_has_color(Pawn, black),
   (is_occupied_by_enemy(Pawn, Offset, GameState);
-    is_empty(Pawn, Offset, GameState),
-    add_coord(Offset, [0, 1], EnPassantCoord),
-    piece_at(EnPassantCoord, PassedPawn, GameState),
-    piece_has_color(PassedPawn, white),
-    piece_has_move_count(PassedPawn, 1)
-    % TODO compare moved at turn = current turn - 1 or has some kind of buff
+    is_en_passant(Pawn, Offset, [0, 1], GameState)
   ).
+
+is_en_passant(Pawn, Offset, EnPassantOffset, GameState) :-
+  is_empty(Pawn, Offset, GameState),
+  add_coord(Offset, EnPassantOffset, EnPassantCoord),
+  piece_at(EnPassantCoord, PassedPawn, GameState),
+  pieces_have_different_colors(Pawn, PassedPawn),
+  piece_has_move_count(PassedPawn, 1),
+  is_turn(GameState, Turn),
+  piece_has_moved_at_turn(PassedPawn, Turn - 1),
+  piece_last_move_offset(PassedPawn, [_X, Y]),
+  Y in -2\/2.
 
 find_rockade_coord(King, Coord, GameState) :-
   find_rockade_coord_(King, Coord, [2, 0], [3, 0], GameState).
@@ -123,8 +124,8 @@ find_rockade_coord_(King, Coord, KingOffset, RookOffset, GameState) :-
   piece_at(RookCoord, Rook, GameState),
   piece_has_move_count(Rook, 0),
   pieces_have_same_color(King, Rook),
-  % not is_attackable
-  not(is_piece_inbetween(KingCoord, RookCoord, GameState)).
+  not(is_piece_inbetween(KingCoord, RookCoord, GameState)),
+  not(is_attackable_while_moving_offset(King, KingOffset, GameState)).
 
 find_straight_lines_until_blocked(Piece, FilteredCoords, GameState) :-
   find_until_blocked(Piece, [1, 0], CoordsRight, GameState),
@@ -177,6 +178,7 @@ find_until_blocked_(_Piece, Limit, _Step, Limit, Acc, Coords, _GameState) :-
   Coords = Acc.
 
 find_until_blocked_(Piece, Current, Step, Limit, Acc, Coords, GameState) :-
+  not_equal_coords(Current, Limit),
   is_coord_empty(Current, GameState),
   add_coord(Current, Step, Next),
   find_until_blocked_(Piece, Next, Step, Limit, [Current | Acc], Coords, GameState).
@@ -228,13 +230,17 @@ piece_movable_offset(Pawn, [0, 2]) :-
   piece_has_color(Pawn, white).
 
 is_coord_attackable_by_white(Coord, GameState) :-
-  piece_movable_coords(Piece, Coords, GameState),
+  [Pieces | _] = GameState,
+  member(Piece, Pieces),
   piece_has_color(Piece, white),
+  piece_movable_coords(Piece, Coords, GameState),
   member(Coord, Coords).
 
 is_coord_attackable_by_black(Coord, GameState) :-
+  [Pieces | _] = GameState,
+  member(Piece, Pieces),
+  piece_has_color(Piece, black),
   piece_movable_coords(Piece, Coords, GameState),
-  piece_has_color(Piece, white),
   member(Coord, Coords).
 
 is_attackable(Piece, GameState) :-
@@ -247,7 +253,34 @@ is_attackable(Piece, GameState) :-
   piece_has_color(Piece, black),
   is_coord_attackable_by_white(Coord, GameState).
 
-exposes_king(Piece, Coord, GameState) :-
+is_attackable_while_moving_to(Piece, To, GameState) :-
+  find_offset(Piece, To, Offset),
+  is_attackable_while_moving_offset(Piece, Offset, GameState).
+
+is_attackable_while_moving_offset(Piece, Offset, GameState) :-
+  piece_is_at_coord(Piece, Coord),
+  find_offset(Piece, To, Offset),
+  sign_coord(Offset, Step),
+  is_attackable_while_moving_to_(Piece, Step, Coord, To, GameState).
+
+is_attackable_while_moving_to_(Piece, Step, Current, To, GameState) :-
+  not_equal_coords(Current, To),
+  piece_has_color(Piece, black),
+  (is_coord_attackable_by_white(Current, GameState); 
+    add_coord(Current, Step, Next),
+    is_attackable_while_moving_to_(Piece, Step, Next, To, GameState)
+  ).
+
+is_attackable_while_moving_to_(Piece, Step, Current, To, GameState) :-
+  not_equal_coords(Current, To),
+  piece_has_color(Piece, white),
+  (is_coord_attackable_by_black(Current, GameState); 
+    add_coord(Current, Step, Next),
+    is_attackable_while_moving_to_(Piece, Step, Next, To, GameState)
+  ).
+
+exposes_king(Piece, Coord, MovableCoords, GameState) :-
+  member(Coord, MovableCoords),
   update_piece_coord(Piece, Coord, GameState, Simulation),
   find_king(Piece, King, Simulation),
   is_attackable(King, Simulation).
@@ -343,7 +376,7 @@ find_king(Piece, King, GameState) :-
 
 find_king(Piece, King, GameState) :-
   piece_has_color(Piece, black),
-  find_white_black(King, GameState).
+  find_black_king(King, GameState).
 
 find_black_king(Piece, GameState) :-
   [Pieces | _] = GameState,
@@ -368,15 +401,15 @@ piece_at_(Coord, Piece, [FirstPiece | Pieces]) :-
   Piece = FirstPiece ;
   piece_at_(Coord, Piece, Pieces).
 
-piece_is_white([_Id, _PieceCoord, white, _PieceType, _MoveCount, _Alive, _Buffs]).
-piece_is_black([_Id, _PieceCoord, black, _PieceType, _MoveCount, _Alive, _Buffs]).
-piece_has_color([_Id, _PieceCoord, PieceColor, _PieceType, _MoveCount, _Alive, _Buffs], PieceColor).
-piece_is_type([_Id, _PieceCoord, _PieceColor, PieceType, _MoveCount, _Alive, _Buffs], PieceType).
-piece_has_move_count([_Id, _PieceCoord, _PieceColor, _PieceType, MoveCount, _Alive, _Buffs], MoveCount).
+piece_is_white([_Id, _PieceCoord, white, _PieceType, _MoveCount, _Alive, _LastMove]).
+piece_is_black([_Id, _PieceCoord, black, _PieceType, _MoveCount, _Alive, _LastMove]).
+piece_has_color([_Id, _PieceCoord, PieceColor, _PieceType, _MoveCount, _Alive, _LastMove], PieceColor).
+piece_is_type([_Id, _PieceCoord, _PieceColor, PieceType, _MoveCount, _Alive, _LastMove], PieceType).
+piece_has_move_count([_Id, _PieceCoord, _PieceColor, _PieceType, MoveCount, _Alive, _LastMove], MoveCount).
 piece_has_id([Id | _], Id).
-piece_is_alive([_Id, _PieceCoord, _PieceColor, _PieceType, _MoveCount, true, _Buffs]).
-piece_is_dead([_Id, _PieceCoord, _PieceColor, _PieceType, _MoveCount, false, _Buffs]).
-piece_is_at_coord([_Id, PieceCoord, white, _PieceType, _MoveCount, _Alive, _Buffs], PieceCoord).
+piece_is_alive([_Id, _PieceCoord, _PieceColor, _PieceType, _MoveCount, true, _LastMove]).
+piece_is_dead([_Id, _PieceCoord, _PieceColor, _PieceType, _MoveCount, false, _LastMove]).
+piece_is_at_coord([_Id, PieceCoord, _PieceColor, _PieceType, _MoveCount, _Alive, _LastMove], PieceCoord).
 pieces_have_same_color(Piece1, Piece2) :-
   piece_has_color(Piece1, Color),
   piece_has_color(Piece2, Color).
@@ -390,19 +423,24 @@ piece_is_white_king(Piece) :-
 piece_is_black_king(Piece) :-
   piece_is_black(Piece),
   piece_is_type(Piece, king).
+piece_has_moved_at_turn([_Id, _Coord, _Color, _Type, _MoveCount, _Alive, [_Offset, MovedAtTurn]], MovedAtTurn).
+piece_last_move_offset([_Id, _Coord, _Color, _Type, _MoveCount, _Alive, [Offset, _MovedAtTurn]], Offset).
 
-col_length([_, TileCount], ColLength) :-
+col_length([_, TileCount, _], ColLength) :-
+  ColLength #> 0,
   ColLength * ColLength #= TileCount.
-row_length([_, TileCount], RowLength) :-
+row_length([_, TileCount, _], RowLength) :-
+  RowLength #> 0,
   RowLength * RowLength #= TileCount.
-board_top([_, TileCount], BoardTop) :-
+board_top([_, TileCount, _], BoardTop) :-
   X #> 0,
   X * X #= TileCount,
   BoardTop #= X - 1.
-board_edge([_, TileCount], BoardEdge) :-
+board_edge([_, TileCount, _], BoardEdge) :-
   X #> 0,
   X * X #= TileCount,
   BoardEdge #= X - 1.
+is_turn([_Pieces, _TileCount, TurnNumber], TurnNumber).
 coord_on_board(Coord, GameState) :-
   [X, Y] = Coord,
   board_edge(GameState, BoardEdge),
@@ -414,12 +452,13 @@ is_piece_inbetween(From, To, GameState) :-
   is_straight_or_diagonal_direction(Offset),
   sign_coord(Offset, Step),
   is_piece_inbetween_(From, To, Step, GameState).
-is_piece_inbetween_(From, _To, Step, GameState) :-
+is_piece_inbetween_(From, To, Step, GameState) :-
   add_coord(From, Step, Next),
+  not_equal_coords(Next, To),
   piece_at(Next, _SomePiece, GameState).
 is_piece_inbetween_(From, To, Step, GameState) :-
-  not_equal_coords(From, To),
   add_coord(From, Step, Next),
+  not_equal_coords(Next, To),
   is_piece_inbetween_(Next, To, Step, GameState).
 is_occupied_by_self(Piece, Offset, GameState) :-
   piece_is_at_coord(Piece, Coord),
@@ -465,10 +504,10 @@ query(Template, Goal, Bag) :-
 
 % CONVERSIONS
 
-convert_game_state([Pieces | [TileCount | _]], GameStateOut) :-
+convert_game_state([Pieces | [TileCount | [Turn | _]]], GameStateOut) :-
   convert_pieces(Pieces, PiecesOut),
   TileCount #= N * N,
-  GameStateOut = [PiecesOut, TileCount].
+  GameStateOut = [PiecesOut, TileCount, Turn].
 
 convert_pieces([], PiecesOut) :- PiecesOut = [].
 convert_pieces([Piece | Pieces], PiecesOut) :-
@@ -476,15 +515,13 @@ convert_pieces([Piece | Pieces], PiecesOut) :-
   convert_pieces(Pieces, RemainingPiecesOut),
   PiecesOut = [PieceOut | RemainingPiecesOut].
 
-convert_piece([Id, Pos, Color, PieceType, MoveCount, Alive, Buffs], PieceOut) :-
+convert_piece([Id, Pos, Color, PieceType, MoveCount, Alive, LastMove], PieceOut) :-
   convert_color(Color, ColorOut),
   convert_piece_type(PieceType, PieceTypeOut),
-  convert_buffs(Buffs, BuffsOut),
-  PieceOut = [Id, Pos, ColorOut, PieceTypeOut, MoveCount, Alive, BuffsOut].
+  PieceOut = [Id, Pos, ColorOut, PieceTypeOut, MoveCount, Alive, LastMove].
 
 convert_color(ColorString, ColorAtom) :- atom_string(ColorAtom, ColorString).
 convert_piece_type(PieceTypeString, PieceTypeAtom) :- atom_string(PieceTypeAtom, PieceTypeString).
-convert_buffs(Buffs, Buffs). % TODO
 
 convert_command(CommandName, Payload, CommandOut) :-
   atom_string(CommandNameOut, CommandName),
@@ -506,7 +543,7 @@ parse_args([_, GameState, _Command, _Payload], GameState, ConvertedCommand) :-
 parse_args(Args, ParsedGameState, ParsedCommand) :-
   write(current_output, Args),
   ParsedGameState = white,
-  ParsedCommand = ["Error", "Invalid input"].
+  ParsedCommand = [error, invalid_input].
 
 % ENTRANCE
 
