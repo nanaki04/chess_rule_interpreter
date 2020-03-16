@@ -9,10 +9,60 @@ run_command([error, Error], _, Output) :- Output = [error, Error].
 run_command([assess_moves, PieceCoord], GameState, Output) :-
   piece_at(PieceCoord, Piece, GameState),
   piece_movable_coords_without_exposing_king(Piece, Output, GameState).
+run_command([check_state, Color], GameState, Output) :-
+  check_state(Color, GameState, Output).
+run_command([is_upgradable, Coord], GameState, Output) :-
+  piece_at(Coord, Piece, GameState),
+  (is_upgradable(Piece, GameState) -> Output = true; Output = false).
 run_command(no_matches, _, Output) :-
   Output = no_matches.
 
 % RULES
+
+check_state(Color, GameState, CheckState) :-
+  is_unable_to_act(Color, GameState),
+  (is_check(Color, GameState),
+    CheckState = check_mate;
+    CheckState = remise
+  );
+  is_check(Color, GameState),
+  CheckState = check;
+  CheckState = ok.
+
+is_upgradable(Pawn, GameState) :-
+  piece_is_type(Pawn, pawn),
+  piece_has_move_count(Pawn, MoveCount),
+  is_turn(GameState, MoveCount),
+  is_upgradable_(Pawn).
+
+is_upgradable_(Pawn, GameState) :-
+  piece_has_color(Pawn, white),
+  board_top(GameState, BoardTop),
+  piece_is_at_coord(Pawn, [_X, BoardTop]).
+
+is_upgradable_(Pawn, _GameState) :-
+  piece_has_color(Pawn, black),
+  piece_is_at_coord(Pawn, [_X, 0]).
+
+is_check(white, GameState) :-
+  find_white_king(King, GameState),
+  is_attackable(King, GameState).
+
+is_check(black, GameState) :-
+  find_black_king(King, GameState),
+  is_attackable(King, GameState).
+
+is_unable_to_act(white, GameState) :-
+  piece_is_alive(Piece),
+  setof(Piece, piece_has_color(Piece, white), Pieces),
+  is_unable_to_act_(Pieces, GameState).
+
+is_unable_to_act_([], _GameState).
+
+is_unable_to_act_([Piece | Pieces], GameState) :-
+  piece_movable_coords_without_exposing_king(Piece, Coords, GameState),
+  length(Coords) #= 0,
+  is_unable_to_act_(Pieces, GameState).
 
 piece_movable_coords_without_exposing_king(Piece, Coords, GameState) :-
   piece_movable_coords(Piece, MovableCoords, GameState),
